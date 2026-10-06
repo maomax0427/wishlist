@@ -153,7 +153,7 @@
     try {
       await flush();
       const j = await api('load');
-      S.oldScript = (j.version || 0) < 1;
+      S.oldScript = (j.version || 0) < 2;
       const local = {};
       S.items.forEach(x => { local[x.id] = x; });
       const out = j.items.map(sv => {
@@ -179,13 +179,22 @@
   /* ---------------- 商品の追加・取得 ---------------- */
   // ブラウザだけで使うとき（スプレッドシート未連携）は r.jina.ai 経由で読む
   async function fetchLocal(url, hint) {
-    let best = null;
+    let best = null, why = '';
     for (const st of X.plan(url).filter(s => s.kind === 'jina')) {
-      const res = await fetch(st.url, { headers: st.headers });
-      const r = X.parse(await res.text(), url, hint);
-      best = X.better(best, r);
+      for (let tryN = 0; tryN < 2; tryN++) {
+        try {
+          const res = await fetch(st.url, { headers: st.headers });
+          const html = await res.text();
+          const r = X.parse(html, url, hint);
+          if (!res.ok && !r.ok) r.why = 'HTTP ' + res.status;
+          best = X.better(best, r);
+          if (r.ok || r.blocked || r.notFound || res.status < 500 && res.status !== 429) break;
+        } catch (e) { why = e.message; }
+        await new Promise(ok => setTimeout(ok, 1500));
+      }
     }
-    return best || X.parse('', url, hint);
+    if (!best) { best = X.parse('', url, hint); best.why = why || '通信エラー'; }
+    return best;
   }
   function applyInfo(it, info, now) {
     if (info.price && !(info.guess && it.price && !it.guess)) {
@@ -215,7 +224,7 @@
       images: info.images || [], img: (info.images || [])[0] || '', site: info.site || X.siteOf(f.url), shop: info.shop || '', brand: info.brand || '', stock: info.stock || '',
       cat: cat || '', pri: 2, memo: '', target: null, status: 'want',
       addedAt: now, updatedAt: now, checkedAt: info.price ? now : 0, hist: info.price ? [[now, info.price]] : [],
-      err: info.ok ? '' : info.notFound ? 'ページが見つかりませんでした' : '商品情報を読み取れませんでした',
+      err: info.ok ? '' : info.notFound ? 'ページが見つかりませんでした' : info.blocked ? 'ボット対策で読めませんでした' : '商品情報を読み取れませんでした' + (info.why ? '（' + info.why + '）' : ''),
     };
   }
   async function addFromText(text) {
@@ -376,7 +385,7 @@
     const sortName = (SORTS.find(s => s[0] === S.sort) || SORTS[0])[1];
     return `
       <div class="page-h"><h1>ほしい物</h1>${syncBtn()}</div>
-      ${S.oldScript ? '<div class="banner">Apps Script が古いようです。設定 → 連携 の手順でコードを貼り替えてください</div>' : ''}
+      ${S.oldScript ? '<div class="banner">Apps Script が古いようです。Code.gs を貼り替えて「新バージョン」でデプロイし直してください（共有ボタンからの読み取りが強くなります）</div>' : ''}
       <form class="addbar" data-form="add" autocomplete="off" novalidate>
         <svg class="lead" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>
         <input id="addInput" name="u" type="text" inputmode="url" autocapitalize="off" autocorrect="off" placeholder="商品のリンクを貼り付け" enterkeyhint="go">
@@ -483,16 +492,17 @@
 
       <div class="sec-h">iPhoneの共有ボタンから追加</div>
       <div class="card set"><div class="fld">
-        ${S.api ? `<p style="margin-top:0">Amazon や Safari の <b>共有 → 「ほしい物に追加」</b> で、アプリを開かずに登録できるようにします（ショートカットを1つ作ります）。iPhone でページを読むので、<b>Amazon の値段も取れます</b>。</p>
-        <details style="margin-top:10px"><summary>ショートカットの作り方（5分）</summary>
+        ${S.api ? `<p style="margin-top:0">Amazon や Safari の <b>共有 → 「ほしい物に追加」</b> で、アプリを開かずに登録できるようにします（ショートカットを1つ作ります）。iPhone でページを読むので、<b>Amazon の値段や、ボット対策のある公式通販（ZOZO・H&amp;M・パタゴニアなど）も読めます</b>。</p>
+        <p>Mac で Claude が作った <b>「ほしい物に追加.shortcut」</b> をダブルクリック → 下の URL を貼る だけで、iCloud 経由で iPhone にも入ります。<br><button class="btn sm soft" style="margin-top:8px" data-act="copy" data-v="${esc(S.api)}">スクリプトの URL をコピー</button></p>
+        <details style="margin-top:10px"><summary>自分で作る場合の手順</summary>
           <ol class="steps">
             <li>「ショートカット」アプリ → 右上の ＋ → 名前を「ほしい物に追加」に。下の ⓘ（詳細）で <b>「共有シートに表示」をオン</b></li>
-            <li>アクション <b>「入力からURLを取得」</b> を追加（入力は「ショートカットの入力」）</li>
-            <li><b>「URLの内容を取得」</b> を追加（URL は 前の「URL」）。▶ を開いて「ヘッダ」に追加：キー <code>User-Agent</code>、値は ↓<br><button class="btn sm soft" style="margin-top:6px" data-act="copy" data-v="${esc(SAFARI_UA)}">User-Agent の値をコピー</button></li>
-            <li>もう1つ <b>「URLの内容を取得」</b> を追加。URL に ↓ を貼る<br><button class="btn sm soft" style="margin-top:6px" data-act="copy" data-v="${esc(S.api)}">スクリプトの URL をコピー</button><br>▶ を開いて 方法：<b>POST</b>、本文を要求：<b>JSON</b>、フィールドを3つ追加（すべて「テキスト」）<br>
-              <code>action</code> → <code>add</code><br><code>text</code> → 変数「ショートカットの入力」<br><code>html</code> → 変数「URLの内容」（3 の結果）</li>
-            <li><b>「辞書の値を取得」</b> を追加 → キーに <code>message</code></li>
-            <li><b>「通知を表示」</b> を追加 → 本文に「辞書の値」</li>
+            <li><b>「入力からURLを取得」</b>（入力は「ショートカットの入力」）→ <b>「リストから項目を取得」</b>（最初の項目）</li>
+            <li><b>「URLの内容を取得」</b>（URL は「リストの項目」）。▶ を開いて「ヘッダ」に追加：キー <code>User-Agent</code>、値は ↓<br><button class="btn sm soft" style="margin-top:6px" data-act="copy" data-v="${esc(SAFARI_UA)}">User-Agent の値をコピー</button></li>
+            <li><b>「Base64エンコード」</b>（入力は「URLの内容」、改行は「なし」）</li>
+            <li>もう1つ <b>「URLの内容を取得」</b>。URL にスクリプトの URL を貼り、▶ で 方法：<b>POST</b>、本文を要求：<b>JSON</b>、フィールド（すべて「テキスト」）：<br>
+              <code>action</code> → <code>add</code>、<code>url</code> → 「リストの項目」、<code>text</code> → 「ショートカットの入力」、<code>html64</code> → 「Base64エンコードされた結果」</li>
+            <li><b>「辞書の値を取得」</b>（キー <code>message</code>）→ <b>「通知を表示」</b>（本文に「辞書の値」）</li>
           </ol>
           <p>あとは商品ページで 共有 → 「ほしい物に追加」。数秒〜十数秒で「追加しました：○○ ¥12,800」と通知が出ます。</p>
         </details>` : `<p style="margin:0">スプレッドシートとつなぐと使えます。今は、商品ページのリンクをコピーして「ほしい物」タブの <b>貼り付け</b> ボタンを押してください。</p>`}
@@ -580,7 +590,7 @@
       <div class="d-title">${esc(it.title)}</div>
       <div class="d-price">${priceLine}</div>
       <div class="d-meta">${meta.join('<span>·</span>')}</div>
-      ${it.err ? `<div class="err-box">${esc(it.err)}。「編集」から名前・値段・写真を入れられます。</div>` : ''}
+      ${it.err ? `<div class="err-box">${esc(it.err)}。${S.api ? 'iPhone の共有ボタン（ショートカット「ほしい物に追加」）から追加し直すと、ほとんどのサイトで読めます。' : '設定でスプレッドシートとつなぎ、共有ボタン用のショートカットを入れると、ほとんどのサイトで読めるようになります。'}「編集」から手で入れることもできます。</div>` : ''}
       ${isB ? `<div class="card" style="margin-top:14px;padding:14px 16px;display:flex;justify-content:space-between;align-items:center"><div><div class="lbl">買った日</div><b>${esc(it.boughtAt || '—')}</b></div><div style="text-align:right"><div class="lbl">払った金額</div><b class="num">${yen(it.paid || it.price, it.currency) || '—'}</b></div></div>` : ''}
       <div class="d-acts">
         <a class="btn primary ${isB ? 'wide' : ''}" href="${esc(it.url || it.src)}" target="_blank" rel="noopener">ショップで見る${I.ext}</a>

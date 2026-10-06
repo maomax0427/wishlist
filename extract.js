@@ -58,8 +58,18 @@
     const u = String(url || '').replace(/^https?:\/\/(www\.)?/i, '').replace(/[?#].*$/, '').replace(/\/+$/, '');
     return u.toLowerCase();
   };
+  // 取得用に整える：#以降を落とし、日本語・空白をエンコード（%xx はそのまま）
+  X.normUrl = function (url) {
+    return String(url || '').trim().replace(/#.*$/, '').replace(/[^\x21-\x7e]+/g, s => encodeURIComponent(s));
+  };
+  // ボット対策で弾かれたページか
+  X.isBlockedPage = function (html) {
+    const t = ((String(html || '').match(/<title[^>]*>([\s\S]{0,200}?)<\/title>/i) || [])[1] || '').trim();
+    return /^(access denied|forbidden|403|just a moment|attention required|robot check|hang tight|unfortunately we are unable|pardon our interruption|request rejected|アクセスが拒否)/i.test(t) || (String(html || '').length < 3000 && /captcha|challenge|errors\.edgesuite\.net/i.test(html));
+  };
   // 読み込み方の順番。kind: direct（そのまま取得）/ jina（ブラウザで開いたページを r.jina.ai 経由で取得）
   X.plan = function (url) {
+    url = X.normUrl(url);
     const jinaHeaders = { 'X-Return-Format': 'html' };
     if (X.isAmazon(url)) {
       jinaHeaders['X-Set-Cookie'] = 'i18n-prefs=JPY; lc-acbjp=ja_JP';
@@ -146,12 +156,12 @@
   }
   function typeIs(o, re) {
     const t = o && o['@type'];
-    return Array.isArray(t) ? t.some(x => re.test(x)) : re.test(String(t || ''));
+    return Array.isArray(t) ? t.some(x => re.test(String(x).replace(/^https?:\/\/schema\.org\//i, ''))) : re.test(String(t || '').replace(/^https?:\/\/schema\.org\//i, ''));
   }
   function findProducts(node, out, depth) {
     if (!node || typeof node !== 'object' || depth > 8) return out;
     if (Array.isArray(node)) { node.forEach(n => findProducts(n, out, depth + 1)); return out; }
-    if (typeIs(node, /^(Product|ProductGroup|IndividualProduct|ProductModel|Book|Vehicle)$/)) out.push(node);
+    if (typeIs(node, /^(Product|ProductGroup|IndividualProduct|ProductModel|Book|Vehicle)$/i)) out.push(node);
     ['@graph', 'mainEntity', 'itemListElement', 'item', 'hasVariant'].forEach(k => node[k] && findProducts(node[k], out, depth + 1));
     return out;
   }
@@ -205,7 +215,8 @@
 
   function goodImage(u) {
     return u && /^https?:\/\//i.test(u) && !/\.(svg|gif)(\?|$)/i.test(u) &&
-      !/(logo|icon|sprite|favicon|banner|blank|spacer|pixel|loading|transparent|badge|button|nav[-_]|\/ads?\/)/i.test(u);
+      !/(logo|icon|sprite|favicon|banner|blank|spacer|pixel|loading|transparent|badge|button|nav[-_]|\/ads?\/|swatch|chip)/i.test(u) &&
+      !/[_-](40|50|60|70|80|100)\.(jpe?g|png|webp)|[?&](w|wid|width)=([1-9]\d?|1[0-4]\d)(&|$)|\$[^$]*swatch[^$]*\$/i.test(u);
   }
 
   // Amazon 専用
@@ -254,6 +265,57 @@
     r.blocked = !r.title && (/captcha|automated access|api-services-support@amazon/i.test(html) || /<title[^>]*>\s*Amazon\.co\.jp\s*<\/title>/i.test(html));
     const brand = html.match(/id=["']bylineInfo["'][^>]*>([\s\S]{0,300}?)<\/a>/i);
     if (brand && !/星|stars|評価|rating/i.test(strip(brand[1]))) r.brand = strip(brand[1]).replace(/^by\s+/i, '').replace(/^(ブランド|Brand)\s*[:：]\s*|のストアを表示|\s*Store$|Visit the\s*|\s*ストア$/gi, '').trim();
+  }
+
+
+  // 写真が少ないとき：メイン画像と同じサーバー・同じ商品番号を含む画像だけ足す（バナーや関連商品を拾わない）
+  function moreImages(html, r, url) {
+    const found = [];
+    const add = u => { u = abs(dec(String(u || '').trim().split(/\s+/)[0]), url); if (u && /\.(jpe?g|png|webp|avif)(\?|$)|\/is\/image\/|\/image\/|imgz|cdn/i.test(u)) found.push(u); };
+    let m;
+    const reImg = /<(?:img|source)\b[^>]*>/gi;
+    while ((m = reImg.exec(html)) && found.length < 400) {
+      const a = attrs(m[0]);
+      [a['data-src'], a['data-original'], a['data-lazy-src'], a['data-zoom-image'], a['data-large'], a.src].forEach(add);
+      const ss = a['data-srcset'] || a.srcset;
+      if (ss) add(ss.split(',').pop());
+    }
+    const rePre = /<link\b[^>]*rel=["']preload["'][^>]*>/gi;
+    while ((m = rePre.exec(html))) { const a = attrs(m[0]); if (/image/i.test(a.as || '')) add(a.href); }
+    const main = abs(dec(r.images[0] || ''), url);
+    if (main) {
+      const host = X.host(main);
+      const toks = main.replace(/^https?:\/\/[^/]+/, '').split(/[/_\-.?=&$,]+/).filter(t => t.length >= 5 && (t.match(/\d/g) || []).length >= 4);
+      found.forEach(u => { if (X.host(u) === host && toks.some(t => u.indexOf(t) >= 0)) r.images.push(u); });
+    } else {
+      found.filter(u => !/(_s|thumb|small|icon|logo)/i.test(u)).slice(0, 6).forEach(u => r.images.push(u));
+    }
+  }
+  // 値段の表示から読む：class に price が付いた要素、または「価格」の見出しのすぐ後ろ
+  function pagePrice(html, r) {
+    const body = html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>|<!--[\s\S]*?-->/gi, ' ').replace(/&yen;|&#165;|&#x0*a5;/gi, '¥');
+    const yenIn = t => { const m = t.match(/[¥￥]\s*([\d,]{2,}(?:\.\d+)?)|([\d,]{3,})\s*円/); return m ? X.num(m[1] || m[2]) : null; };
+    const cands = [];
+    let m;
+    const reCls = /<[a-z]+\b[^>]*class=["']([^"']*price[^"']*)["'][^>]*>/gi;
+    while ((m = reCls.exec(body)) && cands.length < 6) {
+      if (/old|before|regular|list|was|strike|original|reference|point|postage|shipping|range|filter|sort|label-only/i.test(m[1])) continue;
+      const v = yenIn(strip(body.slice(m.index + m[0].length, m.index + m[0].length + 400)).slice(0, 40));
+      if (v) cands.push([m.index, v]);
+    }
+    const reLbl = /(?:販売価格|本体価格|税込価格|価格|プライス)\s*(?:<[^>]*>\s*)*[:：]?/g;
+    while ((m = reLbl.exec(body)) && cands.length < 12) {
+      const v = yenIn(strip(body.slice(m.index + m[0].length, m.index + m[0].length + 300)).slice(0, 30));
+      if (v) { cands.push([m.index, v]); break; }
+    }
+    if (cands.length) {
+      cands.sort((a, b) => a[0] - b[0]);
+      r.price = cands[0][1]; r.currency = 'JPY'; r.guess = false; r.fromPage = true;
+      return;
+    }
+    // 本文の最初の「¥12,345」「12,345円（税込）」を目安として使う
+    const g = body.match(/(?:[¥￥]\s*([\d,]{2,}))|(?:([\d,]{3,})\s*円\s*[（(]?税込)/);
+    if (g) { r.price = X.num(g[1] || g[2]); r.currency = 'JPY'; r.guess = true; }
   }
 
   // html を読んで商品情報にする
@@ -319,22 +381,8 @@
     if (!r.title) r.title = ogTitle || (html.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '';
     r.title = cleanTitle(r.title, siteName);
     if (!r.title && hint) r.title = hint;
-    if (r.images.length < 2) {
-      const re = /<img\b[^>]*>/gi;
-      let m, n = 0;
-      while ((m = re.exec(html)) && n < 6) {
-        const a = attrs(m[0]);
-        const src = a['data-src'] || a['data-original'] || a['data-lazy-src'] || a.src;
-        const w = Number(a.width || 0);
-        if (src && /\.(jpe?g|png|webp)(\?|$)/i.test(src) && !(w && w < 150)) { r.images.push(src); n++; }
-      }
-    }
-    if (!r.price && !r.noGuess) {
-      // 本文の最初の「¥12,345」「12,345円（税込）」を目安として使う
-      const body = html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ');
-      const m = body.match(/(?:[¥￥]\s*([\d,]{2,}))|(?:([\d,]{3,})\s*円\s*[（(]?税込)/);
-      if (m) { r.price = X.num(m[1] || m[2]); r.currency = 'JPY'; r.guess = true; }
-    }
+    if (r.images.length < 4) moreImages(html, r, url);
+    if (!r.price && !r.noGuess) pagePrice(html, r);
     if (r.price && !r.currency) r.currency = /\.jp(\/|$)|\.jp\//.test(url + '/') || /[¥￥円]/.test(html.slice(0, 200000)) ? 'JPY' : '';
     if (r.currency === 'JPY' && r.price) r.price = Math.round(r.price);
     const canon = (html.match(/<link\b[^>]*rel=["']canonical["'][^>]*>/i) || [])[0];
@@ -352,6 +400,7 @@
       return true;
     }).slice(0, 12);
     r.notFound = /お探しのページ|ページが見つかりません|該当する商品がありません|商品が見つかりません|存在しません|削除されました|販売を終了|^404|not found/i.test(r.title);
+    if (X.isBlockedPage(html)) { r.blocked = true; r.title = hint || ''; r.images = []; r.price = null; }
     r.ok = !!(r.title && (r.price || r.images.length)) && !r.blocked && !r.notFound && !/^(access denied|forbidden|403|robot check|attention required|just a moment|エラー|error)/i.test(r.title);
     delete r.noGuess;
     return r;
@@ -369,7 +418,7 @@
   const CAT_WORDS = {
     book: /コミックス|コミック|文庫|新書|単行本|小説|漫画|マンガ|画集|写真集|雑誌|ムック|Kindle|ゲームソフト|Nintendo Switch|Switch2|PS5|PlayStation|ボードゲーム|ISBN|\(著\)|著者/i,
     gadget: /イヤホン|ヘッドホン|ヘッドフォン|AirPods|iPhone|iPad|MacBook|Mac |スマホ|スマートフォン|タブレット|パソコン|ノートPC|モニター|ディスプレイ|キーボード|マウス|充電器|ケーブル|モバイルバッテリー|スピーカー|カメラ|レンズ|Apple Watch|スマートウォッチ|Bluetooth|USB|SSD|HDD|ガジェット|Anker|Galaxy|Pixel|Kindle端末|プロジェクター|ドライヤー|シェーバー/i,
-    fashion: /Tシャツ|シャツ|パンツ|ジーンズ|デニム|スカート|ワンピース|ジャケット|コート|パーカー|スウェット|ニット|セーター|カーディガン|スニーカー|シューズ|ブーツ|サンダル|バッグ|リュック|財布|帽子|キャップ|ベルト|靴下|ソックス|腕時計|ネックレス|ピアス|指輪|リング|メンズ|レディース|ユニクロ|UNIQLO|ZOZO|アウター|トップス|ボトムス/i,
+    fashion: /\b(shirt|t-shirt|tee|polo|jacket|coat|parka|hoodie|sweat|sweater|knit|cardigan|pants|trousers|denim|jeans|skirt|dress|sneakers?|shoes|boots|bag|tote|cap|hat|socks)\b|BEAMS|UNITED ARROWS|SHIPS|Ralph Lauren|ラルフ ?ローレン|H&M|ZARA|COACH|パタゴニア|patagonia|ナイキ|NIKE|adidas|New Balance|ニューバランス|フリース|ブルゾン|ジャージ|ショーツ|Tシャツ|シャツ|パンツ|ジーンズ|デニム|スカート|ワンピース|ジャケット|コート|パーカ|Men's|Women's|スウェット|ニット|セーター|カーディガン|スニーカー|シューズ|ブーツ|サンダル|バッグ|リュック|財布|帽子|キャップ|ベルト|靴下|ソックス|腕時計|ネックレス|ピアス|指輪|リング|メンズ|レディース|ユニクロ|UNIQLO|ZOZO|アウター|トップス|ボトムス/i,
     beauty: /化粧水|乳液|美容液|クリーム|日焼け止め|ファンデーション|リップ|口紅|アイシャドウ|マスカラ|香水|フレグランス|シャンプー|コンディショナー|トリートメント|ヘアオイル|洗顔|クレンジング|コスメ|ネイル|スキンケア|パック/i,
     home: /収納|ラック|棚|チェア|椅子|テーブル|デスク|ソファ|ベッド|マットレス|枕|布団|カーテン|ラグ|照明|ライト|ランプ|鍋|フライパン|食器|マグ|グラス|タオル|掃除機|洗濯|加湿器|空気清浄機|扇風機|電子レンジ|炊飯器|ケトル|冷蔵庫|キッチン|インテリア|ニトリ|無印良品|生活雑貨|洗剤|ティッシュ/i,
     hobby: /キャンプ|アウトドア|テント|釣り|ゴルフ|ランニング|ヨガ|トレーニング|ダンベル|プロテイン|自転車|楽器|ギター|ピアノ|プラモデル|フィギュア|模型|画材|絵の具|手芸|ガーデニング|グッズ|ぬいぐるみ|トレカ|カード/i,
@@ -377,9 +426,14 @@
   X.guessCat = function (info, cats) {
     const text = [info.title, info.brand, info.site].join(' ');
     const ids = (cats || []).map(c => c.id);
+    // いちばん多く当てはまったカテゴリ（同数なら本→コスメ→ガジェット→ファッション→くらし→趣味の順）
+    let best = '', bestN = 0;
     for (const id of ['book', 'beauty', 'gadget', 'fashion', 'home', 'hobby']) {
-      if (ids.indexOf(id) >= 0 && CAT_WORDS[id].test(text)) return id;
+      if (ids.indexOf(id) < 0) continue;
+      const n = (text.match(new RegExp(CAT_WORDS[id].source, 'gi')) || []).length;
+      if (n > bestN) { best = id; bestN = n; }
     }
+    if (best) return best;
     // 自分で作ったカテゴリは名前がそのまま入っていれば
     const c = (cats || []).find(c => c.name && c.name.length >= 2 && text.indexOf(c.name) >= 0);
     return c ? c.id : '';

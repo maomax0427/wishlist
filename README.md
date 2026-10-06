@@ -27,7 +27,10 @@ iPhone ショートカット ──> Apps Script（iPhone で読んだページ�
 - `app.js` … 画面、`apps-script/Code.gs` … 保存・取得・値下がりチェック
 - スプレッドシート未連携のときは、この端末だけに保存して r.jina.ai 経由で読み取ります
 
-### 取れないことがあるもの
+### 読み取りの経路
 
-- Amazon で海外発送できない商品は、Google や r.jina.ai（アメリカ）から見ると値段が出ません。iPhone のショートカットから追加すると取れます。値段の自動チェックも同じ理由で取れないことがあります
-- ZOZOTOWN などボット対策が強いサイトは読めないことがあります。そのときは「編集」で手入力できます
+1. **iPhone のショートカット（いちばん強い）** … iPhone 自身がページを読み、Base64 で Apps Script に送る。Amazon の値段、ZOZO・H&M・パタゴニアなどボット対策のある公式通販も読める。`shortcut/build.py` で署名つきの `.shortcut` を作れる（`python3 shortcut/build.py`、Mac で実行）
+2. **Apps Script** … そのまま取得 → r.jina.ai。Akamai などのボット対策があるサイトは弾かれる
+3. **アプリだけ（未連携）** … ブラウザから r.jina.ai
+
+Amazon で海外発送できない商品は、Google や r.jina.ai（アメリカ）から見ると値段が出ません（1 なら取れる）。値段の自動チェックも同じ理由で取れないことがあります。

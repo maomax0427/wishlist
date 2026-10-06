@@ -17,7 +17,7 @@
  * 商品ページの読み取りルールは GitHub Pages の extract.js を読み込んで使います（このスクリプトの貼り直しは不要）。
  * iPhone のショートカットからは GET  <このURL>?add=<商品のURL>  で追加できます。
  */
-const VERSION = 1;
+const VERSION = 2;
 const EXTRACT_URL = 'https://maomax0427.github.io/wishlist/extract.js';
 const ITEM_SHEET = 'items';
 const CFG_SHEET = 'config';
@@ -183,20 +183,30 @@ function X_() {
 function text_(res) {
   const ct = String((res.getHeaders() || {})['Content-Type'] || (res.getHeaders() || {})['content-type'] || '');
   let cs = (ct.match(/charset=([\w-]+)/i) || [])[1];
-  if (!cs) {
-    const head = res.getContentText('ISO-8859-1').slice(0, 5000);
-    cs = (head.match(/<meta[^>]+charset=["']?([\w-]+)/i) || [])[1];
-  }
+  if (!cs) cs = sniffCharset_(res.getContentText('ISO-8859-1'));
+  return decodeAs_(cs, c => res.getContentText(c), () => res.getContentText());
+}
+function sniffCharset_(latin1) {
+  return (String(latin1).slice(0, 8000).match(/<meta[^>]+charset=["']?([\w-]+)/i) || [])[1];
+}
+function decodeAs_(cs, fn, fallback) {
   cs = String(cs || 'UTF-8').toLowerCase();
   if (/euc/.test(cs)) cs = 'EUC-JP';
   else if (/sjis|shift|ms932|windows-31j|cp932/.test(cs)) cs = 'Shift_JIS';
   else cs = 'UTF-8';
-  try { return res.getContentText(cs); } catch (e) { return res.getContentText(); }
+  try { return fn(cs); } catch (e) { return fallback(); }
+}
+// ショートカットが iPhone で読んだページ（Base64）を文字列に戻す
+function fromB64_(b64) {
+  const blob = Utilities.newBlob(Utilities.base64Decode(String(b64).replace(/\s+/g, '')));
+  const cs = sniffCharset_(blob.getDataAsString('ISO-8859-1'));
+  return decodeAs_(cs, c => blob.getDataAsString(c), () => blob.getDataAsString());
 }
 function fetchInfo_(url, hint) {
   const X = X_();
   let best = null;
   const steps = X.plan(url);
+  url = X.normUrl(url);
   for (let i = 0; i < steps.length; i++) {
     const st = steps[i];
     try {
@@ -219,12 +229,14 @@ function fetchInfo_(url, hint) {
 const uid_ = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 function add_(req) {
   const X = X_();
-  const f = req.url ? { url: req.url, hint: req.hint || '' } : X.findUrl(req.text || '');
+  const f = X.findUrl(req.text || '');
+  if (req.url) f.url = String(req.url);
+  if (req.hint) f.hint = req.hint;
   if (!f.url) throw new Error('URL が見つかりません');
   // ショートカットが iPhone で読み込んだページ（html）があれば先に使う（Amazon は海外からだと値段が出ないことがあるため）
   let info = null;
-  if (req.html) {
-    try { info = X.parse(String(req.html), f.url, f.hint || ''); } catch (e) { }
+  if (req.html || req.html64) {
+    try { info = X.parse(req.html64 ? fromB64_(req.html64) : String(req.html), f.url, f.hint || ''); } catch (e) { }
   }
   if (!info || !info.ok || !info.price) info = X.better(info, fetchInfo_(f.url, f.hint || req.hint || ''));
   const now = Date.now();
@@ -242,7 +254,7 @@ function add_(req) {
     images: info.images || [], img: (info.images || [])[0] || '', site: info.site || X.siteOf(f.url), shop: info.shop || '', brand: info.brand || '', stock: info.stock || '',
     cat, pri: req.pri || 2, memo: '', target: null, status: 'want',
     addedAt: now, updatedAt: now, checkedAt: info.price ? now : 0, hist: info.price ? [[now, info.price]] : [],
-    err: info.ok ? '' : info.notFound ? 'ページが見つかりませんでした' : '商品情報を読み取れませんでした',
+    err: info.ok ? '' : info.notFound ? 'ページが見つかりませんでした' : info.blocked ? 'ボット対策で読めませんでした（共有ボタンから追加すると読めます）' : '商品情報を読み取れませんでした',
   };
   withLock_(() => writeItem_(it, readItems_()));
   return it;
