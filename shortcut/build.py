@@ -18,25 +18,37 @@ def dic(items):
             'WFSerializationType': 'WFDictionaryFieldValue'}
 INPUT = {'Type': 'ExtensionInput'}
 
-u1, u2, u3, u4, u5, u6 = U(), U(), U(), U(), U(), U()
+u0, u1, u2, u3, u4, u5, u6 = U(), U(), U(), U(), U(), U(), U()
+G = U()
+PAGE = {'Type': 'Variable', 'VariableName': 'ページ'}
 actions = [
+    # 0. 送り先（追加するときに URL を聞かれる）
+    {'WFWorkflowActionIdentifier': 'is.workflow.actions.gettext',
+     'WFWorkflowActionParameters': {'UUID': u0, 'WFTextActionText': ''}},
     # 1. 共有されたもの（URL・テキスト・Safari のページ）から URL を取り出す
     {'WFWorkflowActionIdentifier': 'is.workflow.actions.detect.link',
      'WFWorkflowActionParameters': {'UUID': u1, 'WFInput': att(INPUT)}},
     {'WFWorkflowActionIdentifier': 'is.workflow.actions.getitemfromlist',
      'WFWorkflowActionParameters': {'UUID': u2, 'WFInput': att(out(u1, 'URL')), 'WFItemSpecifier': 'First Item'}},
-    # 2. iPhone で商品ページを読む（Amazon やボット対策のある公式通販でも読める）
+    # 2. URL があれば iPhone で商品ページを読む（Amazon やボット対策のある公式通販でも読める）
+    {'WFWorkflowActionIdentifier': 'is.workflow.actions.conditional',
+     'WFWorkflowActionParameters': {'GroupingIdentifier': G, 'WFControlFlowMode': 0, 'WFCondition': 100,
+                                    'WFInput': {'Type': 'Variable', 'Variable': att(out(u2, 'Item from List'))}}},
     {'WFWorkflowActionIdentifier': 'is.workflow.actions.downloadurl',
      'WFWorkflowActionParameters': {'UUID': u3, 'WFURL': text(a=out(u2, 'Item from List')), 'WFHTTPMethod': 'GET', 'ShowHeaders': True,
                                     'WFHTTPHeaders': dic([('User-Agent', text(UA)), ('Accept-Language', text('ja-JP,ja;q=0.9'))])}},
     # 3. 文字化けしないように中身をそのまま Base64 で送る
     {'WFWorkflowActionIdentifier': 'is.workflow.actions.base64encode',
      'WFWorkflowActionParameters': {'UUID': u4, 'WFInput': att(out(u3, 'Contents of URL')), 'WFEncodeMode': 'Encode', 'WFBase64LineBreakMode': 'None'}},
-    # 4. Apps Script に送って登録
+    {'WFWorkflowActionIdentifier': 'is.workflow.actions.setvariable',
+     'WFWorkflowActionParameters': {'WFVariableName': 'ページ', 'WFInput': att(out(u4, 'Base64 Encoded'))}},
+    {'WFWorkflowActionIdentifier': 'is.workflow.actions.conditional',
+     'WFWorkflowActionParameters': {'GroupingIdentifier': G, 'WFControlFlowMode': 2}},
+    # 4. Apps Script に送って登録（URL が見つからなくても共有テキストを送る）
     {'WFWorkflowActionIdentifier': 'is.workflow.actions.downloadurl',
-     'WFWorkflowActionParameters': {'UUID': u5, 'WFURL': text(''), 'WFHTTPMethod': 'POST', 'WFHTTPBodyType': 'JSON', 'ShowHeaders': False,
+     'WFWorkflowActionParameters': {'UUID': u5, 'WFURL': text(a=out(u0, 'Text')), 'WFHTTPMethod': 'POST', 'WFHTTPBodyType': 'JSON', 'ShowHeaders': False,
                                     'WFJSONValues': dic([('action', text('add')), ('url', text(a=out(u2, 'Item from List'))),
-                                                         ('text', text(a=INPUT)), ('html64', text(a=out(u4, 'Base64 Encoded')))])}},
+                                                         ('text', text(a=INPUT)), ('html64', text(a=PAGE))])}},
     {'WFWorkflowActionIdentifier': 'is.workflow.actions.getvalueforkey',
      'WFWorkflowActionParameters': {'UUID': u6, 'WFInput': att(out(u5, 'Contents of URL')), 'WFDictionaryKey': 'message', 'WFGetDictionaryValueType': 'Value'}},
     {'WFWorkflowActionIdentifier': 'is.workflow.actions.notification',
@@ -49,7 +61,7 @@ wf = {
     'WFWorkflowMinimumClientVersionString': '900',
     'WFWorkflowHasShortcutInputVariables': True,
     'WFWorkflowIcon': {'WFWorkflowIconStartColor': 4282601983, 'WFWorkflowIconGlyphNumber': 59446},
-    'WFWorkflowImportQuestions': [{'ActionIndex': 4, 'Category': 'Parameter', 'DefaultValue': '', 'ParameterKey': 'WFURL',
+    'WFWorkflowImportQuestions': [{'ActionIndex': 0, 'Category': 'Parameter', 'DefaultValue': '', 'ParameterKey': 'WFTextActionText',
                                    'Text': 'ほしい物リストの 設定 → 連携 で使っている Apps Script の URL（https://script.google.com/…/exec）を貼ってください'}],
     'WFWorkflowInputContentItemClasses': ['WFURLContentItem', 'WFSafariWebPageContentItem', 'WFStringContentItem', 'WFRichTextContentItem'],
     'WFWorkflowOutputContentItemClasses': [],
@@ -57,6 +69,9 @@ wf = {
     'WFQuickActionSurfaces': [],
     'WFWorkflowHasOutputFallback': False,
 }
+if len(sys.argv) > 1:   # URL を埋め込んで作る（追加時の質問なし）
+    actions[0]['WFWorkflowActionParameters']['WFTextActionText'] = sys.argv[1]
+    wf['WFWorkflowImportQuestions'] = []
 with open('unsigned.shortcut', 'wb') as f:
     plistlib.dump(wf, f, fmt=plistlib.FMT_BINARY)
 r = subprocess.run(['shortcuts', 'sign', '-m', 'anyone', '-i', 'unsigned.shortcut', '-o', 'ほしい物に追加.shortcut'], capture_output=True, text=True)

@@ -153,7 +153,7 @@
     try {
       await flush();
       const j = await api('load');
-      S.oldScript = (j.version || 0) < 2;
+      S.oldScript = (j.version || 0) < 3;
       const local = {};
       S.items.forEach(x => { local[x.id] = x; });
       const out = j.items.map(sv => {

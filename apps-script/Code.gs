@@ -17,7 +17,7 @@
  * 商品ページの読み取りルールは GitHub Pages の extract.js を読み込んで使います（このスクリプトの貼り直しは不要）。
  * iPhone のショートカットからは GET  <このURL>?add=<商品のURL>  で追加できます。
  */
-const VERSION = 2;
+const VERSION = 3;
 const EXTRACT_URL = 'https://maomax0427.github.io/wishlist/extract.js';
 const ITEM_SHEET = 'items';
 const CFG_SHEET = 'config';
@@ -65,20 +65,40 @@ function doGet(e) {
   if (p.add) {
     try {
       const it = add_({ text: p.add, cat: p.cat || '' });
-      const price = it.price ? ' ' + fmt_(it.price, it.currency) : '';
-      return json_({ ok: true, message: it.err ? '追加しました（情報は取れませんでした）' : '追加しました：' + short_(it.title, 40) + price, item: it });
+      log_(['get', p.add, 0, it.err || 'OK ' + (it.price || '値段なし')]);
+      return json_({ ok: true, message: addMessage_(it), item: it });
     } catch (err) {
+      log_(['get', p.add, 0, 'エラー：' + (err && err.message || err)]);
       return json_({ ok: false, message: '追加できませんでした：' + (err && err.message || err) });
     }
   }
   return json_({ ok: true, app: 'wishlist', version: VERSION });
 }
-function doPost(e) {
+// ショートカットからの追加は、うまくいかないときに調べられるよう log シートに記録する
+function log_(row) {
   try {
-    const req = JSON.parse(e.postData.contents || '{}');
+    let sh = ss_().getSheetByName('log');
+    if (!sh) { sh = ss_().insertSheet('log'); sh.appendRow(['日時', '経路', 'URL', 'ページ(KB)', '結果']); sh.setFrozenRows(1); }
+    sh.appendRow([new Date()].concat(row));
+    if (sh.getLastRow() > 300) sh.deleteRows(2, sh.getLastRow() - 300);
+  } catch (e) { }
+}
+function addMessage_(it) {
+  const price = it.price ? ' ' + fmt_(it.price, it.currency) : '';
+  return it.err ? '追加しました（' + it.err + '）：' + short_(it.title, 30) : '追加しました：' + short_(it.title, 40) + price;
+}
+function doPost(e) {
+  let req = {};
+  try {
+    req = JSON.parse(e.postData.contents || '{}');
     switch (req.action) {
       case 'load': return json_({ ok: true, version: VERSION, items: readItems_().items, config: readConfig_(), at: Date.now() });
-      case 'add': return json_({ ok: true, item: add_(req) });
+      case 'add': {
+        const t0 = Date.now();
+        const it = add_(req);
+        log_(['add', req.url || req.text || '', req.html64 ? Math.round(req.html64.length * 0.75 / 1024) : 0, (it.err || 'OK ' + (it.price || '値段なし')) + '（' + Math.round((Date.now() - t0) / 1000) + '秒）']);
+        return json_({ ok: true, message: addMessage_(it), item: it });
+      }
       case 'fetch': return json_({ ok: true, info: fetchInfo_(req.url, req.hint || '') });
       case 'refresh': return json_({ ok: true, item: refresh_(req.id) });
       case 'upsert': return json_(withLock_(() => ({ ok: true, items: upsert_(req.items || []) })));
@@ -87,7 +107,9 @@ function doPost(e) {
       default: return json_({ ok: false, error: 'unknown action: ' + req.action });
     }
   } catch (err) {
-    return json_({ ok: false, error: String(err && err.message || err) });
+    const msg = String(err && err.message || err);
+    if (req.action === 'add') log_(['add', req.url || req.text || '', req.html64 ? Math.round(req.html64.length * 0.75 / 1024) : 0, 'エラー：' + msg]);
+    return json_({ ok: false, error: msg, message: '追加できませんでした：' + msg });
   }
 }
 function withLock_(fn) {
